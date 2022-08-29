@@ -3,12 +3,14 @@ import json
 import base64
 import sqlite3
 import win32crypt
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 import requests
-
 import re
 import time
+import csv
+import os
+import datetime
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 g_LocalStatePath = r'C:\Users\liuxi\AppData\Local\Google\Chrome\User Data\Local State'
 g_CookiesPath = r'C:\Users\liuxi\AppData\Local\Google\Chrome\User Data\Profile 1\Network\Cookies'
@@ -22,23 +24,37 @@ g_filterTime = None
 
 g_allData = {}
 g_fiterData = []
+g_cookie = None
 
 TIME_FORMAT = r'%Y-%m-%d %H:%M:%S'
+
+DATA_KEYS = ['issueId', 'exceptionName', 'exceptionMessage', 'firstUploadTime', 'lastestUploadTime', 'imeiCount',
+             'count']
 
 
 def getBuglySession():
     global g_cookie
     con = sqlite3.connect(g_CookiesPath)
-    res = con.execute('select host_key,name,encrypted_value from cookies').fetchall()
+    res = con.execute('select host_key,name,encrypted_value,expires_utc from cookies').fetchall()
     con.close()
 
     key = pull_the_key(GetString(g_LocalStatePath))
-    for i in res:
-        # print(i[0], i[1], DecryptString(key, i[2]))
-        if i[1] == 'bugly-session':
-            buglySession = DecryptString(key, i[2])
+    for cookieData in res:
+        host_key, name, encrypted_value, expires_utc = cookieData
+        if name == 'bugly-session':
+            cookieExpireTime = GetCookieTime(expires_utc)
+            if time.time() > cookieExpireTime:
+                print('cookie已过期，请重新登录一次bugly')
+                return
+
+            buglySession = DecryptString(key, encrypted_value)
             g_cookie = 'bugly-session=' + buglySession
             break
+
+    if not g_cookie:
+        print(
+            'chrome找不到cookie:bugly-session。请在config.ini配置或者配置chrome相关，使用账号登陆一次www.bugly.com后，稍后重试',
+            g_cookie)
 
 
 def readConfig():
@@ -49,7 +65,6 @@ def readConfig():
     con.read(file, encoding='utf-8')
     items = dict(con.items('config'))
 
-    # print(items)
     g_LocalStatePath = items.get('localstatepath')
     g_CookiesPath = items.get('cookiespath')
     g_PageNum = int(items.get('pagenum'))
@@ -69,6 +84,11 @@ def readConfig():
         g_filterTime = time.localtime()
     else:
         g_filterTime = time.strptime(g_filterTime, TIME_FORMAT)
+
+
+def GetCookieTime(t):
+    s = abs((datetime.datetime(1601, 1, 1) - datetime.datetime(1970, 1, 1)).total_seconds())
+    return int(t / 1000000 - 11644473600)
 
 
 def GetString(LocalState):
@@ -132,20 +152,10 @@ def getFilterData(issueData):
         timeStr = match.group(0)
         uploadTime = time.strptime(timeStr, TIME_FORMAT)
         if uploadTime >= g_filterTime:
-            issueId = issueData.get('issueId')
-            issueId = issueData.get('issueId')
-            exceptionName = issueData.get('exceptionName')
-            exceptionMessage = issueData.get('exceptionMessage')
-            imeiCount = issueData.get('imeiCount')
-            count = issueData.get('count')
             newData = {}
-            newData['issueId'] = issueId
-            newData['exceptionName'] = exceptionName
-            newData['exceptionMessage'] = exceptionMessage
-            newData['firstUploadTime'] = firstUploadTime
-            newData['imeiCount'] = imeiCount
-            newData['count'] = count
-            # g_fiterData[issueId] = newData
+            for key in DATA_KEYS:
+                newData[key] = issueData.get(key)
+
             g_fiterData.append(newData)
 
 
@@ -169,14 +179,45 @@ def writeData(data, filePath):
     f.close()
 
 
+def writeDataAsCsv(data, filePath):
+    with open(filePath, mode="w+", encoding='utf-8-sig', newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow((DATA_KEYS))
+        if type(data) == dict:
+            dataList = []
+            for k, v in data.items():
+                itemData = []
+                for key in DATA_KEYS:
+                    v['exceptionMessage'].replace('\n', ' ')
+                    itemData.append(v[key])
+                dataList.append(itemData)
+            writer.writerows(dataList)
+        elif type(data) == list:
+            dataList = []
+            for v in data:
+                itemData = []
+                for key in DATA_KEYS:
+                    v['exceptionMessage'].replace('\n', ' ')
+                    itemData.append(v[key])
+                dataList.append(itemData)
+            writer.writerows(dataList)
+        f.close()
+
+
 if __name__ == '__main__':
     readConfig()
     getIssueList()
 
     print('======总数据', len(g_allData))
-
     writeData(g_allData, g_allDataOutFile)
 
-    g_fiterData = sorted(g_fiterData, key=lambda a: a['imeiCount'], reverse=True)
+    outFile, _ = os.path.splitext(g_allDataOutFile)
+    writeDataAsCsv(g_allData, outFile + '.csv')
 
+    g_fiterData = sorted(g_fiterData, key=lambda a: a['imeiCount'], reverse=True)
     writeData(g_fiterData, g_filterOutFile)
+
+    filterOutFile, _ = os.path.splitext(g_filterOutFile)
+    writeDataAsCsv(g_fiterData, filterOutFile + '.csv')
+
+    os.system('pause')
