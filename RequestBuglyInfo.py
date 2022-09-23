@@ -9,6 +9,7 @@ import time
 import csv
 import os
 import datetime
+from tqdm import tqdm
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -17,10 +18,11 @@ g_CookiesPath = r'C:\Users\liuxi\AppData\Local\Google\Chrome\User Data\Profile 1
 g_PageNum = 2
 g_PerPageIssue = 10  # bugly限制最大100
 g_appId = '5de366aa27'
-g_referer = 'https://bugly.qq.com/v2/crash-reporting/errors/%s?pid=1' % (g_appId)
+g_referer = 'https://bugly.qq.com/v2/crash-reporting/errors/{0}?pid=1'.format(g_appId)
 g_allDataOutFile = r'G://test2.txt'
 g_filterOutFile = r'G://test3.txt'
 g_filterTime = None
+g_filterVersion = ''
 
 g_allData = {}
 g_fiterData = []
@@ -28,8 +30,15 @@ g_cookie = None
 
 TIME_FORMAT = r'%Y-%m-%d %H:%M:%S'
 
+ISSUE_VERSION_KEY = 'issueVersions'
 DATA_KEYS = ['issueId', 'exceptionName', 'exceptionMessage', 'firstUploadTime', 'lastestUploadTime', 'imeiCount',
-             'count']
+             'count', ISSUE_VERSION_KEY]
+
+UNITY3D_EXCEPTION_TYPE_LIST = 'AllCatched,Unity3D,Lua,JS'
+CRASH_EXCEPTION_TYPE_LIST = 'Crash,Native'
+EXCEPTION_TYPE_LIST = UNITY3D_EXCEPTION_TYPE_LIST
+GET_ISSUE_LIST_URL = 'https://bugly.qq.com/v4/api/old/get-issue-list?start={0}&searchType=errorType&exceptionTypeList={1}&pid=1&platformId=1&date=last_7_day&sortOrder=desc&rows={2}&sortField=uploadTime&appId={3}'
+GET_ISSUE_INFO_URL = 'https://bugly.qq.com/v4/api/old/get-issue-info?appId={0}&pid=1&issueId={1}'
 
 
 def getBuglySession():
@@ -53,12 +62,12 @@ def getBuglySession():
 
     if not g_cookie:
         print(
-            'chrome找不到cookie:bugly-session。请在config.ini配置或者配置chrome相关，使用账号登陆一次www.bugly.com后，稍后重试',
+            'chrome找不到cookie:bugly-session。请在config.ini配置或者配置chrome相关，使用账号登陆一次www.bugly.com后，稍后重试! bugly-session =',
             g_cookie)
 
 
 def readConfig():
-    global g_LocalStatePath, g_CookiesPath, g_PageNum, g_PerPageIssue, g_appId, g_referer, g_allDataOutFile, g_filterOutFile, g_filterTime
+    global g_LocalStatePath, g_CookiesPath, g_PageNum, g_PerPageIssue, g_appId, g_referer, g_allDataOutFile, g_filterOutFile, g_filterTime, g_filterVersion
     global g_cookie
     file = 'config.ini'
     con = configparser.RawConfigParser()
@@ -73,6 +82,7 @@ def readConfig():
     g_allDataOutFile = items.get('alldataoutfile')
     g_filterOutFile = items.get('filterdataoutfile')
     g_filterTime = items.get('filtertime')
+    g_filterVersion = items.get('filterversion')
 
     buglySession = items.get('bugly-session')
     if not buglySession:
@@ -124,28 +134,39 @@ def getIssueList():
         'referer': g_referer
     }
 
+    print('请求bugly数据：totalPage:{0}, perPageNum:{1}'.format(g_PageNum, g_PerPageIssue))
     for i in range(g_PageNum):
         start = i * g_PerPageIssue
-        url = 'https://bugly.qq.com/v4/api/old/get-issue-list?start=%s&searchType=errorType&exceptionTypeList=AllCatched,Unity3D,Lua,JS&pid=1&platformId=1&date=last_7_day&sortOrder=desc&rows=%s&sortField=uploadTime&appId=%s' % (
-            start, g_PerPageIssue, g_appId)
+        url = GET_ISSUE_LIST_URL.format(start, EXCEPTION_TYPE_LIST, g_PerPageIssue, g_appId)
 
         r = requests.get(url, headers=headers)
         jsonData = json.loads(r.text)
         issueList = jsonData.get('data').get('issueList')
-        print('当前页issue个数', len(issueList))
-        for issueData in issueList:
+        print('第{0}页issue个数：{1}'.format(i + 1, len(issueList)))
+        for issueData in tqdm(issueList, desc='请求issue数据，page = {0}'.format(i + 1)):
             issueId = issueData.get('issueId')
             issueData = getCrashDetail(issueId)
-            if not g_allData.get(issueId):
-                g_allData[issueId] = issueData
-                getFilterData(issueData)
-            else:
-                print('重复+1', issueId)
+            if issueData:
+                if not g_allData.get(issueId):
+                    g_allData[issueId] = issueData
+                    getFilterData(issueData)
 
 
 def getFilterData(issueData):
     global g_fiterData
-    firstUploadTime = issueData.get('firstUploadTime') or ''
+
+    targetIssueVersion = None
+    firstUploadTime = ''
+    if not g_filterVersion:
+        firstUploadTime = issueData.get('firstUploadTime') or ''
+    else:
+        issueVersions = issueData.get(ISSUE_VERSION_KEY) or []
+        for versionData in issueVersions:
+            if versionData.get('version') == g_filterVersion:
+                targetIssueVersion = versionData
+                firstUploadTime = versionData.get('firstUploadTime') or ''
+                break
+
     pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
     match = re.match(pattern, firstUploadTime)
     if match:
@@ -155,20 +176,27 @@ def getFilterData(issueData):
             newData = {}
             for key in DATA_KEYS:
                 newData[key] = issueData.get(key)
-
+            if targetIssueVersion:
+                newData[ISSUE_VERSION_KEY] = targetIssueVersion
             g_fiterData.append(newData)
 
 
 def getCrashDetail(issueId):
     global g_referer, g_appId
-    url = 'https://bugly.qq.com/v4/api/old/get-issue-info?appId=%s&pid=1&issueId=' % (g_appId) + issueId
+    url = GET_ISSUE_INFO_URL.format(g_appId, issueId)
     headers = {
         'cookie': g_cookie,
         'referer': g_referer
     }
     r = requests.get(url, headers=headers)
     jsonData = json.loads(r.text)
-    issueData = jsonData.get('data').get('issueList')[0]
+    data = jsonData.get('data')
+    if not data:
+        return None
+    issueList = data.get('issueList')
+    if not issueList or len(issueList) <= 0:
+        return None
+    issueData = issueList[0]
     return issueData
 
 
@@ -208,7 +236,7 @@ if __name__ == '__main__':
     readConfig()
     getIssueList()
 
-    print('======总数据', len(g_allData))
+    print('======剔除重复后总数据个数', len(g_allData))
     writeData(g_allData, g_allDataOutFile)
 
     outFile, _ = os.path.splitext(g_allDataOutFile)
