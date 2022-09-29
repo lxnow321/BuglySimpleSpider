@@ -32,7 +32,8 @@ TIME_FORMAT = r'%Y-%m-%d %H:%M:%S'
 
 ISSUE_VERSION_KEY = 'issueVersions'
 DATA_KEYS = ['issueId', 'exceptionName', 'exceptionMessage', 'firstUploadTime', 'lastestUploadTime', 'imeiCount',
-             'count', ISSUE_VERSION_KEY]
+             'count', ISSUE_VERSION_KEY, 'versionFirstUploadTime', 'versionLastUploadTime', 'versionCount',
+             'versionDeviceCount', 'buglyLink']
 
 UNITY3D_EXCEPTION_TYPE_LIST = 'AllCatched,Unity3D,Lua,JS'
 CRASH_EXCEPTION_TYPE_LIST = 'Crash,Native'
@@ -178,6 +179,10 @@ def getFilterData(issueData):
                 newData[key] = issueData.get(key)
             if targetIssueVersion:
                 newData[ISSUE_VERSION_KEY] = targetIssueVersion
+                newData['versionFirstUploadTime'] = targetIssueVersion.get('firstUploadTime')
+                newData['versionLastUploadTime'] = targetIssueVersion.get('lastUploadTime')
+                newData['versionCount'] = targetIssueVersion.get('count')
+                newData['versionDeviceCount'] = targetIssueVersion.get('deviceCount')
             g_fiterData.append(newData)
 
 
@@ -215,18 +220,20 @@ def writeDataAsCsv(data, filePath):
             dataList = []
             for k, v in data.items():
                 itemData = []
+                v['exceptionMessage'].replace('\n', ' ')
                 for key in DATA_KEYS:
-                    v['exceptionMessage'].replace('\n', ' ')
-                    itemData.append(v[key])
+                    itemData.append(v.get(key))
                 dataList.append(itemData)
             writer.writerows(dataList)
         elif type(data) == list:
             dataList = []
             for v in data:
                 itemData = []
+                v['exceptionMessage'].replace('\n', ' ')
+                link = 'https://bugly.qq.com/v2/crash-reporting/errors/{0}/{1}?pid=1&crashDataType=undefined'.format(g_appId, v.get('issueId'))
+                v['buglyLink'] = link
                 for key in DATA_KEYS:
-                    v['exceptionMessage'].replace('\n', ' ')
-                    itemData.append(v[key])
+                    itemData.append(v.get(key))
                 dataList.append(itemData)
             writer.writerows(dataList)
         f.close()
