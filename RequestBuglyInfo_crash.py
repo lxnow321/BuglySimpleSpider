@@ -11,8 +11,6 @@ import os
 import datetime
 from tqdm import tqdm
 
-import difflib
-
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 g_LocalStatePath = r'C:\Users\liuxi\AppData\Local\Google\Chrome\User Data\Local State'
@@ -26,11 +24,8 @@ g_filterOutFile = r'G://test3.txt'
 g_filterTime = None
 g_filterVersion = ''
 
-g_DataDirName = 'temp'
-
 g_allData = {}
-g_fiterData = {}
-g_unity2020PackageFilterData = {}
+g_fiterData = []
 g_cookie = None
 
 TIME_FORMAT = r'%Y-%m-%d %H:%M:%S'
@@ -38,32 +33,22 @@ TIME_FORMAT = r'%Y-%m-%d %H:%M:%S'
 ISSUE_VERSION_KEY = 'issueVersions'
 DATA_KEYS = ['issueId', 'exceptionName', 'exceptionMessage', 'firstUploadTime', 'lastestUploadTime', 'imeiCount',
              'count', ISSUE_VERSION_KEY, 'versionFirstUploadTime', 'versionLastUploadTime', 'versionCount',
-             'versionDeviceCount', 'buglyLink', 'similarityRate', 'similarity2017ExceptionMessage']
-
-DATA_TYPE_ISSUE = 1
-DATA_TYPE_CRASH = 2
-
-DATATYPE2NAME = {}
-DATATYPE2NAME[DATA_TYPE_ISSUE] = '异常信息'
-DATATYPE2NAME[DATA_TYPE_CRASH] = 'crash信息'
+             'versionDeviceCount', 'buglyLink', 'launchTimeList']
 
 UNITY3D_EXCEPTION_TYPE_LIST = 'AllCatched,Unity3D,Lua,JS'
-CRASH_EXCEPTION_TYPE_LIST = 'Crash,Native'
-
-DATATYPE2EXCEPTIONTYPE = {}
-DATATYPE2EXCEPTIONTYPE[DATA_TYPE_ISSUE] = UNITY3D_EXCEPTION_TYPE_LIST
-DATATYPE2EXCEPTIONTYPE[DATA_TYPE_CRASH] = CRASH_EXCEPTION_TYPE_LIST
-
+CRASH_EXCEPTION_TYPE_LIST = 'Crash,Native,ExtensionCrash'
 # EXCEPTION_TYPE_LIST = UNITY3D_EXCEPTION_TYPE_LIST
 EXCEPTION_TYPE_LIST = CRASH_EXCEPTION_TYPE_LIST
 GET_ISSUE_LIST_URL = 'https://bugly.qq.com/v4/api/old/get-issue-list?start={0}&searchType=errorType&exceptionTypeList={1}&pid=1&platformId=1&date=last_7_day&sortOrder=desc&rows={2}&sortField=uploadTime&appId={3}'
 GET_ISSUE_INFO_URL = 'https://bugly.qq.com/v4/api/old/get-issue-info?appId={0}&pid=1&issueId={1}'
 
-SHOW_CRASH_LAUNCHTIME = True
+GET_CRASH_LIST_URL = 'https://bugly.qq.com/v4/api/old/get-crash-list?searchType=detail&exceptionTypeList={0}&pid=1&crashDataType=undefined&rows=100&appId={1}&platformId=1&issueId={2}'
+
+GET_CRASH_DETAIL = 'https://bugly.qq.com/v4/api/old/get-crash-detail?appId={0}&pid=1&crashHash={1}'
 
 
 def getBuglySession():
-    cookie = None
+    global g_cookie
     con = sqlite3.connect(g_CookiesPath)
     res = con.execute('select host_key,name,encrypted_value,expires_utc from cookies').fetchall()
     con.close()
@@ -75,25 +60,21 @@ def getBuglySession():
             cookieExpireTime = GetCookieTime(expires_utc)
             if time.time() > cookieExpireTime:
                 print('cookie已过期，请重新登录一次bugly')
-                return None
+                return
 
             buglySession = DecryptString(key, encrypted_value)
-            cookie = 'bugly-session=' + buglySession
+            g_cookie = 'bugly-session=' + buglySession
             break
 
-    if not cookie:
+    if not g_cookie:
         print(
             'chrome找不到cookie:bugly-session。请在config.ini配置或者配置chrome相关，使用账号登陆一次www.bugly.com后，稍后重试! bugly-session =',
-            cookie)
-        return None
-
-    return cookie
+            g_cookie)
 
 
 def readConfig():
     global g_LocalStatePath, g_CookiesPath, g_PageNum, g_PerPageIssue, g_appId, g_referer, g_allDataOutFile, g_filterOutFile, g_filterTime, g_filterVersion
     global g_cookie
-    global g_DataDirName
     file = 'config.ini'
     con = configparser.RawConfigParser()
     con.read(file, encoding='utf-8')
@@ -110,26 +91,19 @@ def readConfig():
     g_filterVersion = items.get('filterversion')
 
     buglySession = items.get('bugly-session')
-    if buglySession:
-        g_cookie = 'bugly-session=' + buglySession
+    if not buglySession:
+        getBuglySession()
     else:
-        g_cookie = getBuglySession()
+        g_cookie = 'bugly-session=' + buglySession
 
     if not g_filterTime:
         g_filterTime = time.localtime()
     else:
         g_filterTime = time.strptime(g_filterTime, TIME_FORMAT)
 
-    g_DataDirName = '{0}_{1}'.format(time.strftime('%Y年%m月%d日%H时%M分后数据', g_filterTime),
-                                     time.strftime('%Y%m%d%H%M', time.localtime()))
-
-    if g_cookie:
-        if not os.path.exists(g_DataDirName):
-            os.makedirs(g_DataDirName)
-
 
 def GetCookieTime(t):
-    # s = abs((datetime.datetime(1601, 1, 1) - datetime.datetime(1970, 1, 1)).total_seconds())
+    s = abs((datetime.datetime(1601, 1, 1) - datetime.datetime(1970, 1, 1)).total_seconds())
     return int(t / 1000000 - 11644473600)
 
 
@@ -155,15 +129,8 @@ def DecryptString(key, data):
     return plaintext
 
 
-def getIssueDataDict():
-    return getBuglyDataList(DATA_TYPE_ISSUE)
-
-
-def getCrashDataDict():
-    return getBuglyDataList(DATA_TYPE_CRASH)
-
-
-def getBuglyDataList(dataType):
+def getIssueList():
+    # global g_cookie, g_PageNum, g_PerPageIssue, g_allData, g_referer
     global g_allData
     if not g_cookie:
         print('错误：g_buglySession为None')
@@ -173,44 +140,26 @@ def getBuglyDataList(dataType):
         'referer': g_referer
     }
 
-    typeName = DATATYPE2NAME[dataType]
-
-    print('请求bugly{0}数据：totalPage:{1}, perPageNum:{2}'.format(typeName, g_PageNum, g_PerPageIssue))
-    dataDict = {}
+    print('请求bugly数据：totalPage:{0}, perPageNum:{1}'.format(g_PageNum, g_PerPageIssue))
     for i in range(g_PageNum):
         start = i * g_PerPageIssue
-        url = GET_ISSUE_LIST_URL.format(start, DATATYPE2EXCEPTIONTYPE[dataType], g_PerPageIssue, g_appId)
+        url = GET_ISSUE_LIST_URL.format(start, EXCEPTION_TYPE_LIST, g_PerPageIssue, g_appId)
 
         r = requests.get(url, headers=headers)
         jsonData = json.loads(r.text)
         issueList = jsonData.get('data').get('issueList')
-        print('{0}_第{1}页issue个数：{2}'.format(typeName, i + 1, len(issueList)))
+        print('第{0}页issue个数：{1}'.format(i + 1, len(issueList)))
         for issueData in tqdm(issueList, desc='请求issue数据，page = {0}'.format(i + 1)):
             issueId = issueData.get('issueId')
-            issueData = getDetailInfo(issueId)
+            issueData = getCrashDetail(issueId)
             if issueData:
                 if not g_allData.get(issueId):
                     g_allData[issueId] = issueData
-                if not dataDict.get(issueId):
-                    dataDict[issueId] = issueData
-                    getFilterData(issueData, dataType)
-
-    return dataDict
+                    getFilterData(issueData)
 
 
-def isUnity2020PackageVersion(versionStr):
-    strList = str.split(versionStr, '.')
-    if len(strList) > 0:
-        try:
-            lastVersionNumber = int(strList[-1])
-            return lastVersionNumber == 190 or lastVersionNumber >= 192
-        except:
-            pass
-    return False
-
-
-def getFilterData(issueData, dataType):
-    global g_fiterData, g_unity2020PackageFilterData
+def getFilterData(issueData):
+    global g_fiterData
 
     targetIssueVersion = None
     firstUploadTime = ''
@@ -223,14 +172,6 @@ def getFilterData(issueData, dataType):
                 targetIssueVersion = versionData
                 firstUploadTime = versionData.get('firstUploadTime') or ''
                 break
-
-    isUnity2020Package = True
-    issueVersions = issueData.get(ISSUE_VERSION_KEY) or []
-    for versionData in issueVersions:
-        versionStr = versionData.get('version')
-        if not isUnity2020PackageVersion(versionStr):
-            isUnity2020Package = False
-            break
 
     pattern = '\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}'
     match = re.match(pattern, firstUploadTime)
@@ -248,17 +189,41 @@ def getFilterData(issueData, dataType):
                 newData['versionCount'] = targetIssueVersion.get('count')
                 newData['versionDeviceCount'] = targetIssueVersion.get('deviceCount')
 
-            if isUnity2020Package:
-                if not g_unity2020PackageFilterData.get(dataType):
-                    g_unity2020PackageFilterData[dataType] = []
-                g_unity2020PackageFilterData[dataType].append(newData)
-            else:
-                if not g_fiterData.get(dataType):
-                    g_fiterData[dataType] = []
-                g_fiterData[dataType].append(newData)
+                launchTimeList = getDetailInfo(issueData.get('issueId'))
+                newData['launchTimeList'] = launchTimeList
+            g_fiterData.append(newData)
 
 
 def getDetailInfo(issueId):
+    headers = {
+        'cookie': g_cookie,
+        'referer': g_referer
+    }
+
+    url = GET_CRASH_LIST_URL.format(CRASH_EXCEPTION_TYPE_LIST, g_appId, issueId)
+    r = requests.get(url, headers=headers)
+    jsonData = json.loads(r.text)
+    crashDatas = jsonData.get('data').get('crashDatas')
+
+    # print('==getDetailInfo', url, len(crashDatas))
+
+    launchTimeList = []
+    for crashHash, data in crashDatas.items():
+        version = data.get('productVersion')
+        if version and version == g_filterVersion:
+            get_crash_detail_url = GET_CRASH_DETAIL.format(g_appId, crashHash)
+            # print('---get_crash_detail', get_crash_detail_url)
+            crashDetailRequest = requests.get(get_crash_detail_url, headers=headers)
+            detailJsonData = json.loads(crashDetailRequest.text)
+            detailData = detailJsonData.get('data')
+            # print('登陆时间', detailData.get('crashMap').get('productVersion'), detailData.get('launchTime'))
+            launchTime = detailData.get('launchTime')
+            launchTimeList.append(launchTime)
+    launchTimeList = sorted(launchTimeList)
+    return launchTimeList
+
+
+def getCrashDetail(issueId):
     global g_referer, g_appId
     url = GET_ISSUE_INFO_URL.format(g_appId, issueId)
     headers = {
@@ -277,21 +242,15 @@ def getDetailInfo(issueId):
     return issueData
 
 
-def getPath(filePath):
-    return '{0}/{1}'.format(g_DataDirName, filePath)
-
-
 def writeData(data, filePath):
     jsonStr = json.dumps(data, indent=4)
-    f = open(getPath(filePath), 'w+')
+    f = open(filePath, 'w+')
     f.write(jsonStr)
     f.close()
 
 
 def writeDataAsCsv(data, filePath):
-    a = getPath(filePath)
-    print('===aaa', filePath)
-    with open(getPath(filePath), mode="w+", encoding='utf-8-sig', newline="") as f:
+    with open(filePath, mode="w+", encoding='utf-8-sig', newline="") as f:
         writer = csv.writer(f)
         writer.writerow((DATA_KEYS))
         if type(data) == dict:
@@ -320,51 +279,18 @@ def writeDataAsCsv(data, filePath):
 
 if __name__ == '__main__':
     readConfig()
+    getIssueList()
 
-    if g_cookie:
-        getIssueDataDict()
-        getCrashDataDict()
+    print('======剔除重复后总数据个数', len(g_allData))
+    writeData(g_allData, g_allDataOutFile)
 
-        print('======剔除重复后总数据个数', len(g_allData))
-        writeData(g_allData, g_allDataOutFile)
+    outFile, _ = os.path.splitext(g_allDataOutFile)
+    writeDataAsCsv(g_allData, outFile + '.csv')
 
-        outFile, _ = os.path.splitext(g_allDataOutFile)
-        writeDataAsCsv(g_allData, outFile + '.csv')
+    g_fiterData = sorted(g_fiterData, key=lambda a: a['imeiCount'], reverse=True)
+    writeData(g_fiterData, g_filterOutFile)
 
-        for dataType in g_fiterData.keys():
-            g_fiterData[dataType] = sorted(g_fiterData[dataType], key=lambda a: a['imeiCount'], reverse=True)
-            writeDataAsCsv(g_fiterData[dataType], '过滤后2017包_{0}.csv'.format(DATATYPE2NAME[dataType]))
-
-        for dataType in g_unity2020PackageFilterData.keys():
-            # diffData = []
-            # sameData = []
-            newDataList = []
-            g_unity2020PackageFilterData[dataType] = sorted(g_unity2020PackageFilterData[dataType],
-                                                            key=lambda a: a['imeiCount'],
-                                                            reverse=True)
-            for data2020 in g_unity2020PackageFilterData[dataType]:
-                exceptionMessage2020 = data2020['exceptionMessage']
-                diffValue = 0
-                similarExceptionMessage2017 = ''
-                for data2017 in g_fiterData[dataType]:
-                    exceptionMessage2017 = data2017['exceptionMessage']
-                    value = difflib.SequenceMatcher(None, exceptionMessage2020, exceptionMessage2017).ratio()
-                    if value > diffValue:
-                        diffValue = value
-                        similarExceptionMessage2017 = exceptionMessage2017
-
-                if diffValue < 0.99:
-                    data2020['similarityRate'] = diffValue
-                    data2020['similarity2017ExceptionMessage'] = similarExceptionMessage2017
-                    newDataList.append(data2020)
-
-            # print('----', len(diffData))
-            # writeDataAsCsv(diffData,
-            #                '过滤后2020包单独存在的_{0}.csv'.format(DATATYPE2NAME[dataType]))
-            # writeDataAsCsv(sameData,
-            #                '过滤后2020包相同的_{0}.csv'.format(DATATYPE2NAME[dataType]))
-
-            writeDataAsCsv(newDataList,
-                           '过滤后2020包_{0}.csv'.format(DATATYPE2NAME[dataType]))
+    filterOutFile, _ = os.path.splitext(g_filterOutFile)
+    writeDataAsCsv(g_fiterData, filterOutFile + '.csv')
 
     os.system('pause')
